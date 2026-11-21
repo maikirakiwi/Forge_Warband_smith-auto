@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vrc-smith-auto"
+version = "0.1.0"
+description = "Low-latency vision-and-input auto-clicker for VRChat Desktop blacksmith minigame"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "opencv-python>=4.8",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+capture = [
+    "mss>=9.0",
+    "dxcam>=0.0.5; sys_platform == 'win32'",
+]
+dxgi = [
+    "dxcam>=0.0.5; sys_platform == 'win32'",
+]
+win32 = [
+    "pywin32>=306; sys_platform == 'win32'",
+]
+dev = [
+    "pytest>=8.0",
+]
+all = [
+    "mss>=9.0",
+    "dxcam>=0.0.5; sys_platform == 'win32'",
+    "pywin32>=306; sys_platform == 'win32'",
+    "pytest>=8.0",
+]
+
+[project.scripts]
+vrc-smith-auto = "vrc_smith_auto.app.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["vrc_smith_auto*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

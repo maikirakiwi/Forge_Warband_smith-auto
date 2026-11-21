@@ -1,0 +1,14 @@
+# Core runtime dependencies
+numpy>=1.26
+opencv-python>=4.8
+PyYAML>=6.0
+
+# Live screen capture backends (Windows; pure-ctypes GdiBitBltCapture works even without these)
+mss>=9.0
+dxcam>=0.0.5; sys_platform == "win32"
+
+# Optional Win32 helper (window.py and win32_sendinput.py use stdlib ctypes by default)
+# pywin32>=306; sys_platform == "win32"
+
+# Development / testing
+pytest>=8.0

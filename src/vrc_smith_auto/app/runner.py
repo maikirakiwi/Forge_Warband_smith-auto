@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import logging
+import math
+import time
+from dataclasses import dataclass
+from typing import Any, Callable
+
+from vrc_smith_auto.app.hotkeys import HotkeyController
+from vrc_smith_auto.app.preview import PreviewWindow
+from vrc_smith_auto.capture.offline_source import ImageFrameSource, VideoFileFrameSource
+from vrc_smith_auto.config import AppConfig
+from vrc_smith_auto.control.state_machine import TriggerDecision, TriggerStateMachine
+from vrc_smith_auto.input.win32_sendinput import Win32SendInputMouse
+from vrc_smith_auto.protocols import FramePacket, FrameSource, MouseBackend
+from vrc_smith_auto.vision.detector import GaugeDetector
+from vrc_smith_auto.vision.models import DetectionResult
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class RunResult:
+    """Summary returned by Runner.run() / run_pipeline()."""
+
+    frames_processed: int
+    detections: int
+    clicks: int
+    click_frames: tuple[int, ...]
+    stopped_by_hotkey: bool
+    stopped_by_preview: bool
+    elapsed_s: float
+
+
+class Runner:
+    """Real-time / offline execution loop coupling capture, vision, control, mouse, and hotkeys."""
+
+    def __init__(
+        self,
+        source: FrameSource,
+        mouse: MouseBackend,
+        config: AppConfig | None = None,
+        detector: GaugeDetector | None = None,
+        state_machine: TriggerStateMachine | None = None,
+        hotkeys: HotkeyController | None = None,
+        *,
+        preview: PreviewWindow | None = None,
+        show_preview: bool = False,
+        stop_on_eof: bool | None = None,
+        max_frames: int | None = None,
+        idle_sleep_s: float = 0.001,
+        clock_fn: Callable[[], float] = time.perf_counter,
+        on_frame: Callable[[FramePacket, DetectionResult | None, TriggerDecision | None], None] | None = None,
+    ) -> None:
+        self._source = source
+        self._mouse = mouse
+        self._config = config or AppConfig()
+        self._detector = detector or GaugeDetector(self._config)
+        self._state_machine = state_machine or TriggerStateMachine(self._config)
+        self._hotkeys = hotkeys
+        self._preview = preview
+        self._show_preview = bool(show_preview) or (preview is not None)
+        if stop_on_eof is None:
+            self._stop_on_eof = isinstance(source, (VideoFileFrameSource, ImageFrameSource))
+        else:
+            self._stop_on_eof = bool(stop_on_eof)
+        self._max_frames = max_frames
+        self._idle_sleep_s = max(0.0, float(idle_sleep_s))
+        self._clock_fn = clock_fn
+        self._on_frame = on_frame
+
+    def run(self) -> RunResult:
+        frames_processed = 0
+        detections = 0
+        clicks = 0
+        click_frames: list[int] = []
+        stopped_by_hotkey = False
+        stopped_by_preview = False
+        paused = False
+
+        last_pkt_ts: float | None = None
+        last_pkt_wall: float | None = None
+        last_tick_ts: float | None = None
+        fps_ema: float | None = None
+        prev_frame_wall: float | None = None
+
+        own_preview = self._show_preview and self._preview is None
+        preview_win = PreviewWindow() if own_preview else self._preview
+
+        start_wall = float(self._clock_fn())
+        try:
+            while True:
+                if self._max_frames is not None and frames_processed >= self._max_frames:
+                    break
+
+                if self._hotkeys is not None:
+                    events = self._hotkeys.poll()
+                    if events.emergency_stop:
+                        self._mouse.release_all()
+                        stopped_by_hotkey = True
+                        break
+                    if events.toggle_armed:
+                        paused = not paused
+                        if paused:
+                            self._mouse.release_all()
+                            self._state_machine.reset()
+
+                pkt = self._source.read()
+                if pkt is None:
+                    if self._stop_on_eof:
+                        break
+                    now_wall = float(self._clock_fn())
+                    if last_pkt_ts is not None and last_pkt_wall is not None:
+                        tick_ts = last_pkt_ts + max(0.0, now_wall - last_pkt_wall)
+                        if last_tick_ts is not None:
+                            tick_ts = max(last_tick_ts, tick_ts)
+                        last_tick_ts = tick_ts
+                        self._mouse.tick(tick_ts)
+                    elif self._mouse.is_pressed:
+                        self._mouse.tick(now_wall)
+                    if self._idle_sleep_s > 0.0:
+                        time.sleep(self._idle_sleep_s)
+                    continue
+
+                now_wall = float(self._clock_fn())
+                if prev_frame_wall is not None:
+                    dt_wall = now_wall - prev_frame_wall
+                    if dt_wall > 1e-6:
+                        inst_fps = 1.0 / dt_wall
+                        fps_ema = inst_fps if fps_ema is None else (0.85 * fps_ema + 0.15 * inst_fps)
+                prev_frame_wall = now_wall
+
+                raw_ts = pkt.timestamp_s
+                if isinstance(raw_ts, bool) or not isinstance(raw_ts, (int, float)):
+                    raise ValueError(
+                        f"FramePacket.timestamp_s must be a finite number, got {raw_ts!r}"
+                    )
+                pkt_ts = float(raw_ts)
+                if not math.isfinite(pkt_ts):
+                    raise ValueError(
+                        f"FramePacket.timestamp_s must be finite, got {raw_ts!r}"
+                    )
+                now_s = pkt_ts if last_tick_ts is None else max(last_tick_ts, pkt_ts)
+                last_pkt_ts = now_s
+                last_pkt_wall = now_wall
+                last_tick_ts = now_s
+
+                frames_processed += 1
+                self._mouse.tick(now_s)
+
+                det: DetectionResult | None = None
+                decision: TriggerDecision | None = None
+
+                if not paused:
+                    det = self._detector.detect_packet(pkt)
+                    if det.gauge_present:
+                        detections += 1
+                    allow_trigger = not self._mouse.is_pressed
+                    decision = self._state_machine.update(
+                        det,
+                        now_s,
+                        allow_trigger=allow_trigger,
+                    )
+
+                    if decision.should_click:
+                        set_frame_idx = getattr(self._mouse, "set_frame_idx", None)
+                        if callable(set_frame_idx):
+                            set_frame_idx(pkt.frame_idx)
+
+                        if self._config.dry_run and isinstance(self._mouse, Win32SendInputMouse):
+                            logger.debug(
+                                "dry_run active: suppressed Win32SendInputMouse click at frame %s",
+                                pkt.frame_idx,
+                            )
+                            clicks += 1
+                            click_frames.append(pkt.frame_idx)
+                        else:
+                            pressed = self._mouse.press_left(decision.hold_ms, timestamp_s=now_s)
+                            if pressed:
+                                clicks += 1
+                                click_frames.append(pkt.frame_idx)
+
+                if self._on_frame is not None:
+                    self._on_frame(pkt, det, decision)
+
+                if preview_win is not None:
+                    keep_open = preview_win.show(
+                        pkt.image_bgr,
+                        det,
+                        state=decision,
+                        paused=paused,
+                        fps=fps_ema,
+                    )
+                    if not keep_open:
+                        stopped_by_preview = True
+                        break
+        finally:
+            try:
+                self._mouse.release_all()
+            finally:
+                if own_preview and preview_win is not None:
+                    preview_win.close()
+
+        elapsed_s = max(0.0, float(self._clock_fn()) - start_wall)
+        return RunResult(
+            frames_processed=frames_processed,
+            detections=detections,
+            clicks=clicks,
+            click_frames=tuple(click_frames),
+            stopped_by_hotkey=stopped_by_hotkey,
+            stopped_by_preview=stopped_by_preview,
+            elapsed_s=elapsed_s,
+        )
+
+
+def run_pipeline(
+    source: FrameSource,
+    mouse: MouseBackend,
+    config: AppConfig | None = None,
+    detector: GaugeDetector | None = None,
+    state_machine: TriggerStateMachine | None = None,
+    hotkeys: HotkeyController | None = None,
+    **kwargs: Any,
+) -> RunResult:
+    """Convenience functional wrapper around Runner(...).run()."""
+    return Runner(
+        source=source,
+        mouse=mouse,
+        config=config,
+        detector=detector,
+        state_machine=state_machine,
+        hotkeys=hotkeys,
+        **kwargs,
+    ).run()

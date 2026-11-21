@@ -1,0 +1,43 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python build and package metadata
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Local agent/tool configuration
+.agents/
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Recorded media and example captures
+/example/*.mp4
+/example/*.mov
+/example/*.avi
+/example/*.mkv
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
