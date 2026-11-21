@@ -114,7 +114,7 @@
 
 | 方案 | 實作機制 | 預設阻塞 / 副作用 | 遊戲相容性與安全性 | 採用決策 |
 |---|---|---|---|---|
-| **純 `ctypes` 40-byte `SendInput` (`Win32SendInputMouse`)** | `user32.SendInput`（僅 `MOUSEEVENTF_LEFTDOWN` / `LEFTUP`） | 無阻塞延遲；不傳送 `MOVE`/`ABSOLUTE` 原地點擊 | 支援非阻塞排程放開（`hold_ms=30.0`）與 UIPI/前景檢查 | **採用** |
+| **純 `ctypes` 40-byte `SendInput` (`Win32SendInputMouse`)** | `user32.SendInput`（僅 `MOUSEEVENTF_LEFTDOWN` / `LEFTUP`） | 無阻塞延遲；不傳送 `MOVE`/`ABSOLUTE` 原地點擊 | 支援同一迭代 tap 放開（預設 `hold_ms=1.0`，適合放開判定）與排程放開備援、UIPI/前景檢查 | **採用** |
 | **`pydirectinput`** | `ctypes` `SendInput` 包裝 | **預設 `PAUSE=0.1s`**（每次呼叫強迫等待 `100 ms`，致命延遲） | 多餘相依性，預設值易誤踩 | **不採用** |
 | **`pynput`** | Windows Hook / `SendInput` | 全域執行緒監聽 Hook | 可能與遊戲防作弊或視窗輸入搶佔衝突 | **不採用** |
 | **`pyautogui`** | 舊版 `mouse_event` | 預設 `PAUSE=0.1s`、具 DPI 設定副作用 | 非標準現代輸入 API，容易遭遊戲忽略 | **不採用** |
@@ -122,7 +122,7 @@
 
 ### 5.2 非阻塞點擊與熱鍵實作（`input/` & `app/hotkeys.py`）
 - **40-byte `INPUT` 結構**：明確宣告 `MOUSEINPUT`、`KEYBDINPUT`、`HARDWAREINPUT` 之 `_INPUT_UNION`（Win64 下 `sizeof(INPUT) == 40` bytes），`dx=0, dy=0, dwExtraInfo=0`，確保滑鼠游標原地點擊不跳動。
-- **非阻塞按住與異常保護**：`press_left(duration_ms)` 僅發送 `LEFTDOWN` 並設定 `_release_at_s`，由主迴圈每幀呼叫 `tick(now_s)` 在 `30.0 ms` 到期時發送 `LEFTUP`；`Runner.run()` 透過 `try ... finally: mouse.release_all()` 與 `Esc` 緊急停止保證絕不卡鍵。
+- **按住/放開與異常保護**：`press_left(duration_ms)` 發送 `LEFTDOWN` 並設定 `_release_at_s`。由於目標遊戲是在**滑鼠放開（pointer-up）**時判定，`Runner` 會在按下後等待 `hold_ms`（預設 `1.0 ms`）並於**同一迭代**呼叫 `tick(now_s + hold_ms)` 送出 `LEFTUP`，避免把放開延後到下一影格而多出 2–3 帧延遲；`tick()` 仍保留為每帧輪詢的備援路徑，`Runner.run()` 並透過 `try ... finally: mouse.release_all()` 與 `Esc` 緊急停止保證絕不卡鍵。
 - **測試替身（`SpyMouseBackend`）**：實作相同 `MouseBackend` 協定，於 `--dry-run`、`verify-image`、`verify-video` 與 `benchmark` 中紀錄每次點擊之 `timestamp_s`、`duration_ms`、`release_timestamp_s` 與 `frame_idx`。
 - **熱鍵輪詢（`HotkeyController`）**：透過延遲綁定之 `user32.GetAsyncKeyState` 進行上升緣（`0x8000`）偵測，支援 `F8`（`VK_F8 = 0x77`）切換暫停與 `Esc`（`VK_ESCAPE = 0x1B`）緊急停止。
 
@@ -143,8 +143,9 @@
 2. **遲滯鎖存與冷卻雙重防護（`LATCHED -> COOLDOWN`）**：
    - 觸發點擊後立即轉為 `LATCHED`，必須等到紅色條確實離開金色至 `|raw_pos| > exit_margin`（`1.25`）才轉入 `COOLDOWN`。
    - 冷卻時間 `cooldown_ms = 200.0 ms`（60 FPS 下約 12 frames），即便遊戲在擊中後瞬間切換下一擊（$H_k \to H_{k+1}$），也絕不會在同一次通過或跳變幀重複點擊。
-3. **跨擊次跳變偵測（`_is_gold_jump`）**：當連續影格間金色中心位移超過 `max(4.0, 0.25 * prev_len)` 或長度變化超過 `max(3.0, 0.15 * prev_len)` 時，立即重置 EMA 速度估計，避免前一次的移動速度污染 `lead_ms` 預測計算。
-4. **按壓期間觸發抑制（`allow_trigger`）**：`TriggerStateMachine.update(..., allow_trigger: bool = True)` 支援由呼叫端抑制觸發；`Runner.run()` 固定傳入 `allow_trigger=not self._mouse.is_pressed`。當滑鼠左鍵尚處於非阻塞排程按壓期間（例如設定 `hold_ms > cooldown_ms` 時），狀態機維持於 `ARMED` 並回報 `reason="mouse_held_waiting"` 而不重入觸發，確保 `RunResult.clicks == mouse.click_count == state_machine.trigger_count` 恆等。
+3. **跨擊次跳變偵測（`_is_gold_jump`）**：僅以金色**長度**變化（`> max(3.0, 0.15 * prev_len)`）判定跨擊次跳變，並重置 EMA 速度估計，避免前一次的移動速度污染 `lead_ms` 預測計算。不再比較絕對投影座標中的金色中心——`gold_span` 是沿「當前帧主軸」的 1D 投影，3D 場景中鏡頭/角色晃動或主軸 tilt 估計變動（實測 1° 約可造成 14–50px 投影位移）會讓靜止的判定條看起來像跳變，進而在高速末段把預測速度清零。
+4. **按壓期間觸發抑制（`allow_trigger`）**：`TriggerStateMachine.update(..., allow_trigger: bool = True)` 支援由呼叫端抑制觸發；`Runner.run()` 固定傳入 `allow_trigger=not self._mouse.is_pressed`。當滑鼠左鍵仍處於按住期間（例如把 `hold_ms` 設得比一帧長，或使用自訂 backend 尚未釋放時），狀態機維持於 `ARMED` 並回報 `reason="mouse_held_waiting"` 而不重入觸發，確保 `RunResult.clicks == mouse.click_count == state_machine.trigger_count` 恆等。
+5. **放開時刻排程（`release_delay_s`）**：本作在 pointer-up 判定。觸發帧決定後，狀態機以 `pred_pos = raw + v × lead_ms` 取得「遊戲判定時」的預測位置，回傳 `release_delay_s = clamp(-pred_pos / v, 0, 30ms)`；`Runner` 送出 `LEFTDOWN` 後等待此延遲（`hold_ms` 為下限）再送 `LEFTUP`。因此 `lead_ms` 可直接校正「擷取帧 → 遊戲判定」的總延遲，而不是把判定時刻量化到 60 FPS 的下一帧。
 
 ---
 

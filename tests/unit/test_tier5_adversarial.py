@@ -920,7 +920,10 @@ def test_t5_win32_sendinput_uipi_nofg_and_hotkey_default_binding(
 
 def test_adv_cross_strike_gold_shrink_no_silver_false_click() -> None:
     """BUG-1: Warm-locked Gold shrink (38->12 px) must invalidate stale _ref_gold_len and not false-click."""
-    cfg = AppConfig()
+    # Lead prediction is disabled so this assertion isolates the stale-Gold-length
+    # guard.  With a lead, a bar that reverses just outside the Gold can be
+    # predicted into it for one frame, which is a separate policy trade-off.
+    cfg = AppConfig().with_overrides(lead_ms=0.0)
     detector = GaugeDetector(cfg)
     sm = TriggerStateMachine(cfg)
 

@@ -72,7 +72,11 @@ def test_constructor_variants_and_reset() -> None:
 
 
 def test_startup_and_basic_hysteresis_lifecycle() -> None:
-    sm = TriggerStateMachine(TriggerConfig(entry_margin=0.95, exit_margin=1.25, cooldown_ms=200.0))
+    # Lead prediction is disabled here so this test isolates the zero-latency
+    # hysteresis/cooldown transitions; predicted entry is covered separately.
+    sm = TriggerStateMachine(
+        TriggerConfig(entry_margin=0.95, exit_margin=1.25, cooldown_ms=200.0, lead_ms=0.0)
+    )
 
     # IDLE stays IDLE on absent gauge
     d0 = sm.update(_det(present=False), 0.00)
@@ -200,7 +204,9 @@ def test_hk_to_hk1_overlapping_gold_prevents_double_click() -> None:
 
 
 def test_seg2_h9_rapid_second_pass_at_60hz() -> None:
-    sm = TriggerStateMachine()
+    # Zero-latency sampling test: disable lead so the expected click indices are
+    # the raw in-Gold samples.
+    sm = TriggerStateMachine(TriggerConfig(lead_ms=0.0))
     dt = 1.0 / 60.0
     # 2 frames in Gold (33.3ms), 18 frames outside (300ms), 2 frames in Gold (33.3ms)
     positions = [
@@ -281,13 +287,29 @@ def test_velocity_lead_compensation_and_safety_guards() -> None:
     assert d_fast.reason == "entered_gold"
     assert d_fast.predicted_norm_pos > 0.95
 
-    # Gold-zone jump resets velocity to 0.0 (no false predicted click)
+    # Gold-zone jump (length re-roll) resets velocity to 0.0 (no false predicted click)
     sm.reset()
     sm.update(_det(norm_pos=-2.0, gold_span=(400.0, 440.0)), 0.0)
-    d_jump = sm.update(_det(norm_pos=-1.1, gold_span=(320.0, 356.0)), dt)
+    d_jump = sm.update(_det(norm_pos=-1.1, gold_span=(320.0, 340.0)), dt)
     assert d_jump.velocity_norm_per_s == 0.0
     assert d_jump.predicted_norm_pos == pytest.approx(-1.1)
     assert d_jump.should_click is False
+
+    # A pure screen translation of a still gauge (camera/avatar sway) must NOT
+    # reset the velocity: only the Gold length may signal a new strike.
+    sm.reset()
+    sm.update(_det(norm_pos=-3.0, gold_span=(400.0, 440.0)), 0.0)
+    d_sway = sm.update(_det(norm_pos=-2.5, gold_span=(480.0, 520.0)), dt)
+    assert d_sway.velocity_norm_per_s != 0.0
+    assert d_sway.should_click is False
+
+    # Tilt-estimate changes shift the absolute projection by tens of pixels even
+    # when the physical gauge is still; they must not count as a strike jump either.
+    sm.reset()
+    sm.update(_det(norm_pos=-3.0, gold_span=(322.9, 340.3)), 0.0)
+    d_tilt = sm.update(_det(norm_pos=-2.5, gold_span=(370.5, 388.0)), dt)
+    assert d_tilt.velocity_norm_per_s != 0.0
+    assert d_tilt.should_click is False
 
     # Bounce direction reversal snaps velocity sign immediately
     sm.reset()
@@ -295,6 +317,28 @@ def test_velocity_lead_compensation_and_safety_guards() -> None:
     sm.update(_det(norm_pos=-1.5), dt)  # +30/s
     d_rev = sm.update(_det(norm_pos=-2.0), 2 * dt)  # -30/s immediately
     assert d_rev.velocity_norm_per_s == pytest.approx(-30.0, abs=1e-6)
+
+
+def test_release_delay_centres_the_bar_at_the_configured_judgement_time() -> None:
+    # The game judges on pointer-up; release_delay_s should place the release
+    # so the extrapolated bar position is 0 at now + lead_ms.
+    cfg = TriggerConfig(lead_ms=16.7, max_lead_offset=2.0, entry_margin=0.95)
+    sm = TriggerStateMachine(cfg)
+    dt = 1.0 / 60.0
+    sm.update(_det(norm_pos=-2.0), 1.0)
+    dec = sm.update(_det(norm_pos=-1.2), 1.0 + dt)
+    assert dec.should_click is True
+    assert dec.reason == "predicted_gold_entry"
+    assert dec.predicted_norm_pos == pytest.approx(-0.3984, abs=1e-3)
+    assert dec.release_delay_s == pytest.approx(0.3984 / 48.0, abs=1e-3)
+
+    # A raw in-Gold sample also gets a delay that moves the release to the centre.
+    sm.reset()
+    sm.update(_det(norm_pos=1.5), 2.0)
+    dec2 = sm.update(_det(norm_pos=0.9), 2.0 + dt)
+    assert dec2.should_click is True
+    assert dec2.reason == "entered_gold"
+    assert dec2.release_delay_s == pytest.approx(0.3 / 36.0, abs=1e-3)
 
 
 def test_lost_frames_and_missing_red_handling() -> None:

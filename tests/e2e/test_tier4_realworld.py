@@ -55,29 +55,39 @@ ALL_23_EPISODES: tuple[tuple[str, int, int], ...] = (
 def _assert_video_click_frames_meet_scenario2(
     click_frames: list[int],
     *,
-    lead_ms: float = 0.0,
+    judge_delay_frames: int = 0,
     cooldown_ms: float = 200.0,
 ) -> None:
-    lead_frames = math.ceil(lead_ms / (1000.0 / 60.0)) if lead_ms > 0.0 else 0
+    """Validate clicks at the frame the *game* judges them.
+
+    The click is decided from a captured frame, but the game processes the
+    SendInput event on a later frame (detection + dispatch + one game tick).
+    ``judge_delay_frames=2`` models the measured worst case; a zero-latency
+    assertion would accept a click that is already outside the Gold by the time
+    the game sees it.
+    """
+
+    def _judged(fidx: int) -> int:
+        return fidx + judge_delay_frames
 
     def _in_win(fidx: int, ep: tuple[str, int, int]) -> bool:
-        return (ep[1] - lead_frames) <= fidx <= ep[2]
+        return ep[1] <= _judged(fidx) <= ep[2]
 
     # 1. Zero inactive false positives
     inactive_hits = [
-        f for f in click_frames if any(lo <= f <= hi for lo, hi in INACTIVE_SEGMENTS)
+        f for f in click_frames if any(lo <= _judged(f) <= hi for lo, hi in INACTIVE_SEGMENTS)
     ]
-    assert inactive_hits == [], f"Clicks during inactive segments: {inactive_hits}"
+    assert inactive_hits == [], f"Clicks judged during inactive segments: {inactive_hits}"
 
-    # 2. 100% Gold precision (every click falls in one of the 23 Any-Overlap episodes)
+    # 2. 100% Gold precision (every judged click falls in one of the 23 Any-Overlap episodes)
     outside_hits = [
         f for f in click_frames if not any(_in_win(f, ep) for ep in ALL_23_EPISODES)
     ]
-    assert outside_hits == [], f"Clicks outside 23 gold episodes (false positives): {outside_hits}"
+    assert outside_hits == [], f"Clicks judged outside 23 gold episodes (false positives): {outside_hits}"
 
     # 3. Zero double-clicks per episode & cooldown spacing
     for name, start, end in ALL_23_EPISODES:
-        ep_hits = [f for f in click_frames if (start - lead_frames) <= f <= end]
+        ep_hits = [f for f in click_frames if _in_win(f, (name, start, end))]
         assert len(ep_hits) <= 1, f"Double-click in episode {name} ({start}..{end}): {ep_hits}"
 
     min_gap = math.floor(cooldown_ms / (1000.0 / 60.0) + 1e-6)
@@ -175,7 +185,7 @@ def test_t4_s2_full_1570_frame_real_gameplay_video_replay(
     assert frame_count == 1570
     _assert_video_click_frames_meet_scenario2(
         click_frames,
-        lead_ms=cfg.lead_ms,
+        judge_delay_frames=2,
         cooldown_ms=cfg.cooldown_ms,
     )
 
@@ -270,20 +280,26 @@ def test_t4_s3_synthetic_10_strike_sway_tilt_distractor_video(
     finally:
         src.close()
 
+    # The game judges the click ~2 frames after the capture frame (detection +
+    # dispatch + one game tick).  Score the judged frame, not the decision frame.
+    judge_delay_frames = 2
+    judged = [f + judge_delay_frames for f in click_frames]
+
     # 1. Zero clicks in inactive prelude/epilogue
-    for fidx in click_frames:
-        assert truth[fidx]["show_gauge"] is True, f"Click on inactive frame {fidx}"
+    for fidx in judged:
+        assert 0 <= fidx < len(truth), f"Judged frame {fidx} out of range"
+        assert truth[fidx]["show_gauge"] is True, f"Click judged on inactive frame {fidx}"
 
     # 2. 100% precision within Any-Overlap episodes
-    for fidx in click_frames:
+    for fidx in judged:
         assert any(s <= fidx <= e for s, e, _, _ in episodes), (
-            f"Click at frame {fidx} outside all ground-truth Any-Overlap episodes {episodes}"
+            f"Click judged at frame {fidx} outside all ground-truth Any-Overlap episodes {episodes}"
         )
 
     # 3. Zero double-clicks per episode
     hit_episodes: list[tuple[int, int, int, float]] = []
     for ep in episodes:
-        ep_hits = [f for f in click_frames if ep[0] <= f <= ep[1]]
+        ep_hits = [f for f in judged if ep[0] <= f <= ep[1]]
         assert len(ep_hits) <= 1, f"Double-click in synthetic episode {ep}: {ep_hits}"
         if len(ep_hits) == 1:
             hit_episodes.append(ep)
@@ -402,7 +418,7 @@ def test_t4_s5_end_to_end_cli_json_and_exit_code_contracts(
     cli_clicks, cli_frames = e2e.extract_cli_clicks(vid_data)
     assert cli_clicks >= 20
     assert len(cli_frames) == cli_clicks
-    _assert_video_click_frames_meet_scenario2(cli_frames)
+    _assert_video_click_frames_meet_scenario2(cli_frames, judge_delay_frames=2)
 
     # 4. benchmark pass & threshold breach failure
     proc_bench_ok = e2e.run_cli(

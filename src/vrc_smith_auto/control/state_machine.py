@@ -46,6 +46,10 @@ class TriggerDecision:
     dry_run: bool
     reason: str
     timestamp_s: float
+    # Non-zero when the button should be released after this delay (seconds)
+    # instead of immediately, so the bar is centred when the release-judged
+    # game processes the pointer-up.  Derived from the predicted position.
+    release_delay_s: float = 0.0
 
     @property
     def effective_norm_pos(self) -> float | None:
@@ -70,16 +74,24 @@ def _is_gold_jump(
     prev_span: tuple[float, float] | None,
     curr_span: tuple[float, float] | None,
 ) -> bool:
+    """Detect a strike-to-strike Gold-zone change from the Gold length alone.
+
+    ``gold_span`` is a 1D projection onto the *current* frame's gauge axis, in
+    absolute screen pixels.  The gauge is world-anchored, so it translates and
+    rotates on screen whenever the camera or avatar moves; a small change in the
+    estimated axis tilt alone shifts that projection by tens of pixels even when
+    the physical gauge is stationary.  Comparing the absolute projected centre
+    therefore fires on ordinary camera sway and wipes the velocity estimate
+    exactly in the fast, narrow-Gold phase where lead compensation is needed.
+
+    A new strike re-rolls the Gold length, so the length delta (invariant to
+    screen translation and rotation) is used as the jump signal instead.
+    """
     if prev_span is None or curr_span is None:
         return False
-    prev_c = 0.5 * (prev_span[0] + prev_span[1])
     prev_len = abs(prev_span[1] - prev_span[0])
-    curr_c = 0.5 * (curr_span[0] + curr_span[1])
     curr_len = abs(curr_span[1] - curr_span[0])
-    return (
-        abs(curr_c - prev_c) > max(4.0, 0.25 * prev_len)
-        or abs(curr_len - prev_len) > max(3.0, 0.15 * prev_len)
-    )
+    return abs(curr_len - prev_len) > max(3.0, 0.15 * prev_len)
 
 
 class TriggerStateMachine:
@@ -375,6 +387,14 @@ class TriggerStateMachine:
                     else "armed_waiting"
                 )
 
+        release_delay_s = 0.0
+        if should_click and self._config.lead_ms > 0.0 and abs(vel) > 1e-6:
+            # -pred_pos / vel is the time from "now" until the bar reaches the
+            # centre at now + lead_ms.  Releasing then puts the pointer-up at
+            # the centre for a game that judges at release + lead_ms, instead of
+            # at whatever position the 60 FPS trigger frame happened to catch.
+            release_delay_s = _clamp(-pred_pos / vel, 0.0, 0.030)
+
         return TriggerDecision(
             should_click=should_click,
             state=self._state,
@@ -388,4 +408,5 @@ class TriggerStateMachine:
             dry_run=self._config.dry_run,
             reason=reason,
             timestamp_s=now_s,
+            release_delay_s=release_delay_s,
         )

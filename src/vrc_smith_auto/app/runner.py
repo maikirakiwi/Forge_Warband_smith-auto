@@ -19,6 +19,16 @@ from vrc_smith_auto.vision.models import DetectionResult
 logger = logging.getLogger(__name__)
 
 
+def _sleep_until(deadline: float) -> None:
+    """Sleep until a perf_counter deadline, busy-waiting the last ~1.5 ms."""
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0.0:
+            return
+        if remaining > 0.0015:
+            time.sleep(remaining - 0.001)
+
+
 @dataclass(frozen=True, slots=True)
 class RunResult:
     """Summary returned by Runner.run() / run_pipeline()."""
@@ -68,6 +78,20 @@ class Runner:
         self._idle_sleep_s = max(0.0, float(idle_sleep_s))
         self._clock_fn = clock_fn
         self._on_frame = on_frame
+
+    def _release_after_hold(self, now_s: float, hold_ms: float) -> None:
+        """Release the button in this iteration instead of a later frame.
+
+        The target game judges on pointer-up.  ``mouse.tick()`` is normally
+        polled once per captured frame, so a 30 ms hold would defer the release
+        by 2–3 frames and silently consume the narrow-Gold timing budget.  Wait
+        out ``hold_ms`` now and release inside the same iteration so the judged
+        moment stays aligned with the trigger decision.
+        """
+        hold_s = max(0.0, float(hold_ms) / 1000.0)
+        if hold_s > 0.0:
+            _sleep_until(time.perf_counter() + hold_s)
+        self._mouse.tick(now_s + hold_s)
 
     def run(self) -> RunResult:
         frames_processed = 0
@@ -179,6 +203,10 @@ class Runner:
                             if pressed:
                                 clicks += 1
                                 click_frames.append(pkt.frame_idx)
+                                release_ms = decision.hold_ms
+                                if decision.release_delay_s > 0.0:
+                                    release_ms = max(release_ms, decision.release_delay_s * 1000.0)
+                                self._release_after_hold(now_s, release_ms)
 
                 if self._on_frame is not None:
                     self._on_frame(pkt, det, decision)

@@ -172,11 +172,12 @@ def test_config_defaults_match_empirical_baseline(default_config: AppConfig) -> 
     assert default_config.capture_backend == "auto"
     assert default_config.window_title == "VRChat"
     assert default_config.require_foreground is True
-    assert default_config.hold_ms == 30.0
+    assert default_config.hold_ms == 1.0
     assert default_config.cooldown_ms == 200.0
     assert default_config.entry_margin == 0.95
     assert default_config.exit_margin == 1.25
-    assert default_config.lead_ms == 0.0
+    assert default_config.lead_ms == 8.3
+    assert default_config.trigger.max_lead_offset == 2.0
     assert default_config.dry_run is False
 
     # Verify default HSV bounds match synthetic empirical Survey 2 BGR colors

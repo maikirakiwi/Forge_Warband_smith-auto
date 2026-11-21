@@ -50,11 +50,12 @@ def test_f1_appconfig_defaults_match_contract(e2e: Any) -> None:
     assert cfg.capture_backend == "auto"
     assert cfg.window_title == "VRChat"
     assert cfg.require_foreground is True
-    assert cfg.hold_ms == pytest.approx(30.0)
+    assert cfg.hold_ms == pytest.approx(1.0)
     assert cfg.cooldown_ms == pytest.approx(200.0)
     assert cfg.entry_margin == pytest.approx(0.95)
     assert cfg.exit_margin == pytest.approx(1.25)
-    assert cfg.lead_ms == pytest.approx(0.0)
+    assert cfg.lead_ms == pytest.approx(8.3)
+    assert cfg.trigger.max_lead_offset == pytest.approx(2.0)
     assert cfg.dry_run is False
 
 

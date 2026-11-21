@@ -117,8 +117,12 @@ def test_t3_c2_rapid_strike_transition_hk_to_hk1_no_double_click(
     assert clicks == 2
     assert len(click_frames) == 2
     assert click_frames[1] - click_frames[0] >= 12
+    # Judge on the frame the game processes the input (lead + dispatch + game tick).
     for fidx in click_frames:
-        assert truth[fidx]["any_overlap"] is True
+        judged = fidx + 2
+        assert 0 <= judged < len(truth)
+        assert truth[judged]["show_gauge"] is True
+        assert truth[judged]["any_overlap"] is True
 
 
 def test_t3_c3_dry_run_verify_video_and_spy_mouse_parity(

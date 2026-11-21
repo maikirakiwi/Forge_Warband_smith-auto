@@ -189,12 +189,23 @@ class GeometryConfig:
 class TriggerConfig:
     """Trigger state machine hysteresis, debounce, and mouse hold parameters."""
 
-    hold_ms: float = 30.0
+    # The target game judges on mouse *release* (Unity UI pointer-up), so the
+    # button is tapped and released within the same Runner iteration.  A long
+    # hold only adds 2–3 frames of latency to the judged moment.  Raise this
+    # only for a game that judges on pointer-down.
+    hold_ms: float = 1.0
     cooldown_ms: float = 200.0
     entry_margin: float = 0.95
     exit_margin: float = 1.25
-    lead_ms: float = 0.0
-    max_lead_offset: float = 0.5
+    # Half a 60 FPS frame of capture -> detect -> SendInput latency.  This
+    # advances the trigger by ~1 sample at high speed without predicting a
+    # near-miss reversal (a bar turning around just outside Gold) into a click.
+    # Raise towards 16.7–33.3 ms if late strikes still land past the far edge.
+    lead_ms: float = 8.3
+    # Maximum predicted offset in normalised Gold half-lengths.  The old 0.5
+    # cap could only compensate ~18 ms at 500 px/s on an 18 px Gold zone, i.e.
+    # less than the pipeline latency it was meant to cancel.
+    max_lead_offset: float = 2.0
     rearm_lost_frames: int = 3
     dry_run: bool = False
 

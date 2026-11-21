@@ -78,6 +78,29 @@ pip install -e .
 - `--preview`：開啟即時偵測預覽視窗。
 - `--no-focus-guard`：允許 VRChat 非前景時執行，通常僅供離線測試。
 
+### 離線驗證
+
+```powershell
+# 單張截圖：確認非金色區不會誤觸
+.\.venv\Scripts\python.exe -m vrc_smith_auto verify-image --image PATH --expect-clicks 0 --json
+
+# 整段影片：以影片時間戳逐帧重放
+.\.venv\Scripts\python.exe -m vrc_smith_auto verify-video --video PATH --dry-run --json
+
+# 單帧延遲基準（p95 門檻預設 16.7ms）
+.\.venv\Scripts\python.exe -m vrc_smith_auto benchmark --video PATH --iterations 200 --max-p95-ms 16.7 --json
+```
+
+## 高速末段調校
+
+末段金色區會縮到約 `18px`、红條速度可達約 `500px/s`，單帧就移動半個判定區。本作是**滑鼠放開才判定**，所以 `Runner` 會依 `release_delay_s` 把 `LEFTUP` 排程到「預測红條在中心」的時刻；`lead_ms` 代表**從擷取到的帧到遊戲實際判定**的總延遲（含偵測約 10ms 與遊戲下一次輸入輪詢約 16.7ms）。若仍然「只有最高難度才失手」：
+
+- `trigger.lead_ms`：預設 `8.3` 是保守值（避免红條在金色外折返時被預測成進入）。最高難度建議先試 `16.7`，再試 `25`–`33.3`；若反而打到銀/灰（提前），往下調。
+- `trigger.max_lead_offset`：預測位移上限（norm 單位）。預設 `2.0`；太小會補不到末段。
+- `trigger.hold_ms`：`1.0` 是最小按住時間；實際放開可能再延後最多約 30ms 以對準中心。若點擊偶爾完全沒反應（遊戲沒收到 down+up），可試 `3`–`5`；每多 1ms 在末段只多約 0.5px。
+- 失敗方向判斷：红條已過金色才判定 → 提高 `lead_ms`；红條還沒到中心就判定（銀/灰）→ 降低 `lead_ms`；完全沒判定 → 提高 `hold_ms`。
+- 執行時不要開 `--preview`，並確認主迴圈能穩定 60fps（單帧偵測 p95 < 16.7ms）。
+
 ## 設定檔
 
 建立 `config.yaml`，再透過 `--config` 載入：
@@ -96,12 +119,12 @@ window:
   rect_refresh_s: 1.0
 
 trigger:
-  hold_ms: 30.0
+  hold_ms: 1.0
   cooldown_ms: 200.0
   entry_margin: 0.95
   exit_margin: 1.25
-  lead_ms: 0.0
-  max_lead_offset: 0.5
+  lead_ms: 8.3
+  max_lead_offset: 2.0
   rearm_lost_frames: 3
   dry_run: false
 ```
