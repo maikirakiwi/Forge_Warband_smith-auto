@@ -78,26 +78,6 @@ pip install -e .
 - `--preview`：開啟即時偵測預覽視窗。
 - `--no-focus-guard`：允許 VRChat 非前景時執行，通常僅供離線測試。
 
-### 驗證單張圖片
-
-```powershell
-.\.venv\Scripts\python.exe -m vrc_smith_auto verify-image --image <PATH> [--expect-clicks 0] [--json]
-```
-
-### 回放驗證影片
-
-```powershell
-.\.venv\Scripts\python.exe -m vrc_smith_auto verify-video --video <PATH> [--dry-run] [--json]
-```
-
-支援 `MP4` 或 `AVI` 影片逐影格回放。
-
-### 量測處理延遲
-
-```powershell
-.\.venv\Scripts\python.exe -m vrc_smith_auto benchmark [--video <PATH> | --live] [--iterations 200] [--max-p95-ms 16.7] [--json]
-```
-
 ## 設定檔
 
 建立 `config.yaml`，再透過 `--config` 載入：
