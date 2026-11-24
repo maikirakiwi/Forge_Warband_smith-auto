@@ -3,16 +3,18 @@ from __future__ import annotations
 import logging
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from vrc_smith_auto.app.hotkeys import HotkeyController
 from vrc_smith_auto.app.preview import PreviewWindow
+from vrc_smith_auto.app.smithy import SmithyAutomation
 from vrc_smith_auto.capture.offline_source import ImageFrameSource, VideoFileFrameSource
 from vrc_smith_auto.config import AppConfig
 from vrc_smith_auto.control.state_machine import TriggerDecision, TriggerStateMachine
+from vrc_smith_auto.input.spy_mouse import SpyMouseBackend
 from vrc_smith_auto.input.win32_sendinput import Win32SendInputMouse
-from vrc_smith_auto.protocols import FramePacket, FrameSource, MouseBackend
+from vrc_smith_auto.protocols import FramePacket, FrameSource, MouseBackend, SmithyInput
 from vrc_smith_auto.vision.detector import GaugeDetector
 from vrc_smith_auto.vision.models import DetectionResult
 
@@ -101,6 +103,18 @@ class Runner:
         stopped_by_hotkey = False
         stopped_by_preview = False
         paused = False
+        smithy = None
+        client_rect = None
+        gauge_was_allowed = True
+        if self._config.auto_fire_up:
+            ui_input = self._mouse
+            if isinstance(ui_input, Win32SendInputMouse):
+                client_rect = ui_input.client_rect
+                if self._config.dry_run:
+                    ui_input = SpyMouseBackend()
+            if not isinstance(ui_input, SmithyInput):
+                raise ValueError("auto_fire_up requires cursor and Tab support from the input backend")
+            smithy = SmithyAutomation(ui_input, self._config.auto_sell)
 
         last_pkt_ts: float | None = None
         last_pkt_wall: float | None = None
@@ -175,7 +189,15 @@ class Runner:
                 det: DetectionResult | None = None
                 decision: TriggerDecision | None = None
 
-                if not paused:
+                gauge_allowed = not paused and (
+                    smithy is None or smithy.allows_gauge(replace(pkt, timestamp_s=now_s), client_rect)
+                )
+                if gauge_was_allowed and not gauge_allowed and not paused:
+                    self._state_machine.reset()
+                    self._detector.reset()
+                gauge_was_allowed = gauge_allowed
+
+                if gauge_allowed:
                     det = self._detector.detect_packet(pkt)
                     if det.gauge_present:
                         detections += 1
@@ -216,7 +238,7 @@ class Runner:
                         pkt.image_bgr,
                         det,
                         state=decision,
-                        paused=paused,
+                        paused=not gauge_allowed,
                         fps=fps_ema,
                     )
                     if not keep_open:

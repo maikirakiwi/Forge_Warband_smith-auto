@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         default=None,
-        help="Run detection and state machine without sending OS mouse clicks.",
+        help="Run detection and state machine without sending OS input.",
     )
     p_run.add_argument(
         "--preview",
@@ -188,7 +188,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
 
     mouse: MouseBackend
-    if cfg.dry_run:
+    if cfg.dry_run and not cfg.auto_fire_up:
         mouse = SpyMouseBackend()
     else:
         class_arg = cfg.window.class_name or None
