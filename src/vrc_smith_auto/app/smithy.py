@@ -63,12 +63,14 @@ class SmithyAutomation:
             return self._state == "gauge"
         probe_started = time.perf_counter()
         self._next_probe = now + 0.12
-        if self._state != "gauge" and now >= self._deadline:
+        if self._state not in ("gauge", "fire_up") and now >= self._deadline:
             raise RuntimeError(f"Smithy automation timed out during {self._state.replace('_', ' ')}")
 
         client = client_rect() if client_rect is not None else packet.screen_rect
         packet = self._client_frame(packet, client)
         if packet is None:
+            if self._state == "fire_up" and now >= self._deadline:
+                raise RuntimeError("Fire Up timed out because the full VRChat client is outside the capture")
             return self._state == "gauge"
         rect = packet.screen_rect
         self._vision.prepare(packet.image_bgr)
@@ -83,6 +85,25 @@ class SmithyAutomation:
             if point is not None and self._click(rect, point):
                 elapsed = time.perf_counter() - probe_started
                 self._enter("after_fire_up", now + elapsed, 0.5 if self._auto_sell else 0.12)
+                return False
+            if point is not None:
+                reason = getattr(self._mouse, "last_blocked_reason", None)
+                status = f"input was blocked ({reason or 'cursor movement or click failed'})"
+            else:
+                hit = find("hit")
+                if hit is not None and self._mouse.move_cursor(rect, *hit):
+                    self._enter("gauge", now)
+                    return True
+                if hit is not None:
+                    reason = getattr(self._mouse, "last_blocked_reason", None)
+                    status = f"the cursor could not move to Hit ({reason or 'cursor movement failed'})"
+                elif find("fire_up_unavailable") is not None:
+                    self._deadline = now + 8.0
+                    return False
+                else:
+                    status = "the enabled Fire Up button was not recognized"
+            if now >= self._deadline:
+                raise RuntimeError(f"Fire Up timed out because {status}")
             return False
         elif self._state == "after_fire_up":
             if self._auto_sell and find("fire_up_unavailable") is None:

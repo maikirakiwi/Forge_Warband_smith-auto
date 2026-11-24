@@ -121,6 +121,36 @@ def test_fire_up_resumes_when_selling_is_disabled_or_fire_up_is_unavailable(monk
     assert mouse.cursor == (295, 140)
 
 
+def test_fire_up_waits_for_enabled_button_and_accepts_height_scaled_ui(monkeypatch):
+    monkeypatch.setattr("vrc_smith_auto.app.smithy.time", SimpleNamespace(sleep=lambda _: None, perf_counter=lambda: 0))
+    mouse = RecordingInput()
+    automation = SmithyAutomation(mouse, auto_sell=True)
+    size = (1024, 768)
+    disabled = scene(size, ("hit_unavailable", 231, 117), ("fire_up_unavailable", 231, 225))
+    enabled = scene(size, ("hit_unavailable", 231, 117))
+    image = _load("fire_up")
+    scaled = cv2.resize(image, None, fx=768 / 1080, fy=768 / 1080, interpolation=cv2.INTER_AREA)
+    h, w = scaled.shape[:2]
+    enabled[225:225 + h, 231:231 + w] = scaled
+
+    assert not automation.allows_gauge(FramePacket(disabled, 0.0, 0))
+    assert not automation.allows_gauge(FramePacket(disabled, 9.0, 1))
+    assert mouse.events == []
+    assert not automation.allows_gauge(FramePacket(enabled, 9.2, 2))
+    assert mouse.events == [(231 + w // 2, 225 + h // 2)]
+
+
+def test_fire_up_timeout_reports_when_input_is_blocked():
+    mouse = RecordingInput()
+    mouse.move_cursor = lambda *args: False
+    mouse.last_blocked_reason = "not_foreground"
+    automation = SmithyAutomation(mouse, auto_sell=True)
+    forge = scene((1280, 720), ("hit_unavailable", 231, 117), ("fire_up", 231, 225))
+    assert not automation.allows_gauge(FramePacket(forge, 0.0, 0))
+    with pytest.raises(RuntimeError, match="input was blocked.*not_foreground"):
+        automation.allows_gauge(FramePacket(forge, 8.1, 1))
+
+
 def test_ui_input_uses_client_origin_and_requires_current_foreground_window(monkeypatch):
     rect = WindowRect.from_xywh(-1260, 90, 1280, 720, hwnd=42)
     foreground = False

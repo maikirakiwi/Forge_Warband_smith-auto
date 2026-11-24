@@ -234,14 +234,16 @@ class Win32SendInputMouse:
         return get_client_rect(hwnd) if hwnd else None
 
     def _allows_ui_input(self, rect: WindowRect | None) -> bool:
+        self._last_blocked_reason = None
         hwnd = self._resolve_hwnd()
         current = get_client_rect(hwnd) if hwnd else None
-        return (
-            rect is not None
-            and current is not None
-            and rect == current
-            and self._allows_input(hwnd)
-        )
+        if current is None:
+            self._last_blocked_reason = "no_target_window"
+            return False
+        if rect != current:
+            self._last_blocked_reason = "window_moved_or_resized"
+            return False
+        return self._allows_input(hwnd)
 
     def move_cursor(self, rect: WindowRect | None, x: int, y: int) -> bool:
         if rect is None or not (0 <= x < rect.width and 0 <= y < rect.height):
@@ -249,7 +251,10 @@ class Win32SendInputMouse:
         with self._lock:
             if not self._allows_ui_input(rect):
                 return False
-            return bool(ctypes.windll.user32.SetCursorPos(rect.left + x, rect.top + y))
+            if not ctypes.windll.user32.SetCursorPos(rect.left + x, rect.top + y):
+                self._last_blocked_reason = "set_cursor_pos_failed"
+                return False
+            return True
 
     def press_tab(self, rect: WindowRect | None) -> bool:
         with self._lock:

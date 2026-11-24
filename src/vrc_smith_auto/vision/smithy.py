@@ -28,9 +28,9 @@ def _match(image: np.ndarray, template: np.ndarray) -> tuple[float, tuple[int, i
 
 class SmithyVision:
     def __init__(self, auto_sell: bool) -> None:
-        names = ["hit", "hit_unavailable", "fire_up"]
+        names = ["hit", "hit_unavailable", "fire_up", "fire_up_unavailable"]
         if auto_sell:
-            names += ["fire_up_unavailable", "smithy"]
+            names.append("smithy")
         self._buttons = {name: cv2.cvtColor(_load(name), cv2.COLOR_BGR2GRAY) for name in names}
         self._panels = {name: _load(name) for name, *_ in _PANELS} if auto_sell else {}
         self._background = self._panels["empty_storage"][61, 43] if auto_sell else None
@@ -45,10 +45,14 @@ class SmithyVision:
             self._size = (width, height)
             self._sx, self._sy = width / 1920, height / 1080
             self._scaled_buttons = {
-                name: self._resize(image, self._sx, self._sy)
+                name: tuple(
+                    self._resize(image, sx, self._sy) for sx in dict.fromkeys((self._sx, self._sy))
+                )
                 for name, image in self._buttons.items()
             }
-            self._coarse_hit = self._resize(self._buttons["hit_unavailable"], self._sx / 2, self._sy / 2)
+            self._coarse_hits = tuple(
+                self._resize(image, 0.5, 0.5) for image in self._scaled_buttons["hit_unavailable"]
+            )
             self._scaled_panels = {
                 name: self._resize(image, self._sx, self._sy) for name, image in self._panels.items()
             }
@@ -60,16 +64,26 @@ class SmithyVision:
                           interpolation=cv2.INTER_AREA if max(sx, sy) <= 1 else cv2.INTER_LINEAR)
 
     def button(self, name: str) -> tuple[int, int] | None:
-        template = self._scaled_buttons[name]
+        matches = []
+        for index, template in enumerate(self._scaled_buttons[name]):
+            coarse = self._coarse_hits[index] if name == "hit_unavailable" else None
+            match = self._button_match(template, coarse)
+            if match is not None:
+                matches.append(match)
+        return min(matches)[1] if matches else None
+
+    def _button_match(
+        self, template: np.ndarray, coarse: np.ndarray | None
+    ) -> tuple[float, tuple[int, int]] | None:
         width, height = self._size
         h, w = template.shape
         x0 = y0 = 0
-        if name == "hit_unavailable":
+        if coarse is not None:
             if self._coarse is None:
                 small = cv2.resize(self._frame, (max(1, width // 2), max(1, height // 2)),
                                    interpolation=cv2.INTER_AREA)
                 self._coarse = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            coarse_score, (cx, cy) = _match(self._coarse, self._coarse_hit)
+            coarse_score, (cx, cy) = _match(self._coarse, coarse)
             if coarse_score > 0.17:
                 return None
             x0, y0 = max(0, 2 * cx - 6), max(0, 2 * cy - 6)
@@ -82,7 +96,7 @@ class SmithyVision:
         score, (x, y) = _match(image, template)
         if score > 0.10:
             return None
-        return x0 + x + w // 2, y0 + y + h // 2
+        return score, (x0 + x + w // 2, y0 + y + h // 2)
 
     def storage(self) -> list[tuple[int, int]] | None:
         """Return occupied slot centers, or None if the storage panel is unconfirmed."""
