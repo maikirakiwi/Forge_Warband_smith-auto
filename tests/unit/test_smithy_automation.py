@@ -63,6 +63,47 @@ def test_scaled_templates_distinguish_button_states_and_storage(size):
     assert vision.storage() is None
 
 
+@pytest.mark.parametrize("size", [(1280, 720), (1920, 1080)])
+@pytest.mark.parametrize("distance_scale", [0.53, 0.62, 0.83, 1.19, 1.49])
+def test_button_matching_adjusts_to_apparent_size(size, distance_scale):
+    width, height = size
+    scale = height / 1080 * distance_scale
+    vision = SmithyVision(auto_sell=True)
+    for name, other in [
+        ("hit", "hit_unavailable"),
+        ("hit_unavailable", "hit"),
+        ("fire_up", "fire_up_unavailable"),
+        ("fire_up_unavailable", "fire_up"),
+        ("smithy", None),
+    ]:
+        image = cv2.resize(_load(name), None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        h, w = image.shape[:2]
+        x, y = 519, 173
+        frame = np.full((height, width, 3), 38, np.uint8)
+        frame[y:y + h, x:x + w] = image
+        vision.prepare(frame)
+
+        point = vision.button(name)
+        assert point is not None, name
+        assert abs(point[0] - (x + w // 2)) <= 3
+        assert abs(point[1] - (y + h // 2)) <= 3
+        if other is not None:
+            assert vision.button(other) is None
+
+
+def test_smithy_hover_accepts_pointer_inside_button_beyond_label(monkeypatch):
+    frame = scene((1920, 1080), ("smithy", 750, 480))
+    vision = SmithyVision(auto_sell=True)
+    pointer = (960, 525)
+    monkeypatch.setattr(vision, "cursor", lambda: pointer)
+    vision.prepare(frame)
+
+    assert vision.hovered_button("smithy") == pointer
+
+    pointer = (1060, 525)
+    assert vision.hovered_button("smithy") is None
+
+
 def test_runner_sells_mixed_storage_then_resumes_gold(monkeypatch):
     monkeypatch.setattr("vrc_smith_auto.app.smithy.time", SimpleNamespace(sleep=lambda _: None, perf_counter=lambda: 0))
     size = (1280, 720)
@@ -77,9 +118,9 @@ def test_runner_sells_mixed_storage_then_resumes_gold(monkeypatch):
     two_items = scene(size, (mixed, 231, 117))
     hit = scene(size, ("hit", 231, 117))
     replay = [
-        (0.0, forge), (0.499, hit), (0.6, hit), (0.9, smithy),
-        (1.2, two_items), (1.5, two_items), (1.8, scene(size, (one_left, 231, 117))),
-        (2.1, scene(size, (empty, 231, 117))), (2.4, hit),
+        (0.0, forge), (0.499, forge), (0.6, forge), (1.5, forge), (1.8, smithy),
+        (2.1, two_items), (2.4, two_items), (2.7, scene(size, (one_left, 231, 117))),
+        (3.0, scene(size, (empty, 231, 117))), (3.3, hit),
     ]
     frames = iter(FramePacket(image, ts, i) for i, (ts, image) in enumerate(replay))
     mouse = RecordingInput()
@@ -99,12 +140,83 @@ def test_runner_sells_mixed_storage_then_resumes_gold(monkeypatch):
         ),
     )
     result = runner.run()
-    assert seen == [8]
-    assert result.click_frames == (8,)
+    assert seen == [9]
+    assert result.click_frames == (9,)
     assert mouse.events == [
         (268, 243), "Tab", (325, 140),
         (260, 158), (260, 158), (296, 195), (296, 195), "Tab", (295, 140),
     ]
+
+
+def test_perspective_storage_can_locate_grid_from_full_reference():
+    vision = SmithyVision(auto_sell=True, perspective_storage=True)
+    vision._storage_features.pop(0)
+    frame = scene((1920, 1080), ("full_storage", 620, 310))
+    vision.prepare(frame)
+
+    slots = vision.storage()
+    assert slots is not None
+    expected = [(620 + x, 310 + y) for y in (57, 112, 166) for x in (35, 91, 146, 201)]
+    np.testing.assert_allclose(slots, expected, atol=2)
+
+
+def test_perspective_storage_tracks_partial_grid_through_motion_and_empty_state(monkeypatch):
+    empty = _load("empty_storage")
+    partial = empty.copy()
+    centers = [(43, 61), (98, 61), (154, 117), (209, 172)]
+    for x, y in centers:
+        cv2.rectangle(partial, (x - 21, y - 21), (x + 21, y + 21), (161, 153, 148), 3)
+        cv2.rectangle(partial, (x - 9, y - 8), (x + 9, y + 8), (85, 130, 190), -1)
+    cv2.fillConvexPoly(partial, np.int32([(84, 115), (110, 126), (95, 139)]), (205, 178, 35))
+    height, width = empty.shape[:2]
+    corners = np.float32([(0, 0), (width, 0), (width, height), (0, height)])
+    vision = SmithyVision(auto_sell=True, perspective_storage=True)
+    find_panel = vision._find_storage_transform
+    monkeypatch.setattr(vision, "_find_storage_transform",
+                        lambda bounds: None if offset == 37 else find_panel(bounds))
+
+    for offset, panel, remaining in [(0, partial, centers), (37, partial, centers), (68, empty, [])]:
+        destination = np.float32([(330 + offset, 180), (582 + offset, 184),
+                                  (588 + offset, 423), (335 + offset, 428)])
+        transform = cv2.getPerspectiveTransform(corners, destination)
+        vision.prepare(cv2.warpPerspective(panel, transform, (1280, 1080)))
+        occupied = vision.storage()
+        assert occupied is not None
+        assert len(occupied) == len(remaining)
+        if remaining:
+            expected = cv2.perspectiveTransform(np.float32([remaining]), transform)[0]
+            np.testing.assert_allclose(occupied, expected, atol=3)
+
+
+def test_runner_gives_active_gauge_priority_over_smithy(monkeypatch):
+    probes = []
+    detections = []
+    smithy = SimpleNamespace(
+        allows_gauge=lambda packet, _: probes.append(packet.frame_idx) or packet.frame_idx == 0
+    )
+    monkeypatch.setattr("vrc_smith_auto.app.runner.SmithyAutomation", lambda *args, **kwargs: smithy)
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    frames = iter(FramePacket(frame, i * 0.2, i) for i in range(8))
+
+    def detect(packet):
+        detections.append(packet.frame_idx)
+        return SimpleNamespace(gauge_present=packet.frame_idx in {0, 2, 3})
+
+    def update(detection, *_args, **_kwargs):
+        return SimpleNamespace(should_click=detection.gauge_present, hold_ms=1, release_delay_s=0)
+
+    result = Runner(
+        source=SimpleNamespace(read=lambda: next(frames, None)),
+        mouse=RecordingInput(),
+        config=AppConfig.from_dict({"trigger": {"auto_fire_up": True, "rearm_lost_frames": 3}}),
+        stop_on_eof=True,
+        detector=SimpleNamespace(reset=lambda: None, detect_packet=detect),
+        state_machine=SimpleNamespace(reset=lambda: None, update=update),
+    ).run()
+
+    assert probes == [0, 6, 7]
+    assert detections == list(range(7))
+    assert result.click_frames == (0, 2, 3)
 
 
 @pytest.mark.parametrize("auto_sell", [False, True])
@@ -119,6 +231,21 @@ def test_fire_up_resumes_when_selling_is_disabled_or_fire_up_is_unavailable(monk
     assert automation.allows_gauge(FramePacket(ready, 0.6, 1))
     assert mouse.events == [(268, 243)]
     assert mouse.cursor == (295, 140)
+
+
+def test_delayed_disabled_fire_up_does_not_open_smithy(monkeypatch):
+    monkeypatch.setattr("vrc_smith_auto.app.smithy.time", SimpleNamespace(
+        sleep=lambda _: None, perf_counter=lambda: 0,
+    ))
+    mouse = RecordingInput()
+    automation = SmithyAutomation(mouse, auto_sell=True)
+    size = (1280, 720)
+    forge = scene(size, ("hit_unavailable", 400, 117), ("fire_up", 231, 117))
+    ready = scene(size, ("hit", 400, 117), ("fire_up_unavailable", 231, 117))
+    for index, timestamp in enumerate((0.0, 0.55, 0.85)):
+        assert not automation.allows_gauge(FramePacket(forge, timestamp, index))
+    assert automation.allows_gauge(FramePacket(ready, 1.1, 3))
+    assert len(mouse.events) == 1
 
 
 def test_fire_up_waits_for_enabled_button_and_accepts_height_scaled_ui(monkeypatch):
@@ -151,6 +278,30 @@ def test_fire_up_timeout_reports_when_input_is_blocked():
         automation.allows_gauge(FramePacket(forge, 8.1, 1))
 
 
+def test_relative_aim_waits_for_a_new_frame_before_clicking(monkeypatch):
+    monkeypatch.setattr("vrc_smith_auto.app.smithy.time", SimpleNamespace(
+        sleep=lambda _: None, perf_counter=lambda: 0,
+    ))
+    mouse = RecordingInput()
+    moves = []
+    mouse.move_relative = lambda rect, dx, dy: moves.append((dx, dy)) or True
+    automation = SmithyAutomation(mouse, auto_sell=False, use_rendered_cursor=True)
+    cursor = (100, 135)
+    monkeypatch.setattr(automation._vision, "cursor", lambda: cursor)
+    monkeypatch.setattr(automation._vision, "hovered_button", lambda *args, **kwargs: None)
+    size = (1280, 720)
+    frame = scene(size, ("hit_unavailable", 360, 117), ("fire_up", 231, 117))
+    rect = WindowRect.from_xywh(0, 0, *size)
+
+    assert not automation.allows_gauge(FramePacket(frame, 0.0, 0, rect))
+    assert moves == [(24, 0)]
+    assert mouse.events == []
+
+    cursor = (268, 135)
+    assert not automation.allows_gauge(FramePacket(frame, 0.2, 1, rect))
+    assert len(mouse.events) == 1
+
+
 def test_ui_input_uses_client_origin_and_requires_current_foreground_window(monkeypatch):
     rect = WindowRect.from_xywh(-1260, 90, 1280, 720, hwnd=42)
     foreground = False
@@ -167,7 +318,7 @@ def test_ui_input_uses_client_origin_and_requires_current_foreground_window(monk
         target_hwnd=42,
         check_uipi=False,
         is_foreground_fn=lambda _: foreground,
-        send_input_fn=lambda event: sent.append((event.type, event.ki.wVk, event.ki.dwFlags)) or 1,
+        send_input_fn=lambda event: sent.append((event.type, event.ki.wScan, event.ki.dwFlags)) or 1,
         get_last_error_fn=lambda: 0,
     )
     assert not mouse.move_cursor(rect, 300, 120)
@@ -177,4 +328,4 @@ def test_ui_input_uses_client_origin_and_requires_current_foreground_window(monk
     assert mouse.move_cursor(rect, 300, 120)
     assert mouse.press_tab(rect)
     assert moves == [(-960, 210)]
-    assert sent == [(1, 9, 0), (1, 9, 2)]
+    assert sent == [(1, 0x0F, 0x08), (1, 0x0F, 0x0A)]

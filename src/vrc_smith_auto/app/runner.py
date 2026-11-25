@@ -105,7 +105,6 @@ class Runner:
         paused = False
         smithy = None
         client_rect = None
-        gauge_was_allowed = True
         if self._config.auto_fire_up:
             ui_input = self._mouse
             if isinstance(ui_input, Win32SendInputMouse):
@@ -114,7 +113,13 @@ class Runner:
                     ui_input = SpyMouseBackend()
             if not isinstance(ui_input, SmithyInput):
                 raise ValueError("auto_fire_up requires cursor and Tab support from the input backend")
-            smithy = SmithyAutomation(ui_input, self._config.auto_sell)
+            smithy = SmithyAutomation(
+                ui_input, self._config.auto_sell,
+                use_rendered_cursor=self._config.window.title.casefold() == "vrchat",
+            )
+        gauge_was_allowed = smithy is None
+        gauge_missing_frames = 0
+        smithy_probe_after = self._config.trigger.rearm_lost_frames
 
         last_pkt_ts: float | None = None
         last_pkt_wall: float | None = None
@@ -126,6 +131,8 @@ class Runner:
         preview_win = PreviewWindow() if own_preview else self._preview
 
         start_wall = float(self._clock_fn())
+        next_idle_report = start_wall + 5.0
+        reported_gauge = False
         try:
             while True:
                 if self._max_frames is not None and frames_processed >= self._max_frames:
@@ -139,6 +146,7 @@ class Runner:
                         break
                     if events.toggle_armed:
                         paused = not paused
+                        logger.info("Automation %s", "paused" if paused else "resumed")
                         if paused:
                             self._mouse.release_all()
                             self._state_machine.reset()
@@ -148,6 +156,9 @@ class Runner:
                     if self._stop_on_eof:
                         break
                     now_wall = float(self._clock_fn())
+                    if now_wall >= next_idle_report:
+                        logger.warning("Waiting for capture frames (%d processed)", frames_processed)
+                        next_idle_report = now_wall + 10.0
                     if last_pkt_ts is not None and last_pkt_wall is not None:
                         tick_ts = last_pkt_ts + max(0.0, now_wall - last_pkt_wall)
                         if last_tick_ts is not None:
@@ -161,6 +172,9 @@ class Runner:
                     continue
 
                 now_wall = float(self._clock_fn())
+                next_idle_report = now_wall + 5.0
+                if not self._stop_on_eof and frames_processed == 0:
+                    logger.info("Receiving frames (%dx%d). Looking for the timing gauge and forge controls.", pkt.width, pkt.height)
                 if prev_frame_wall is not None:
                     dt_wall = now_wall - prev_frame_wall
                     if dt_wall > 1e-6:
@@ -189,16 +203,26 @@ class Runner:
                 det: DetectionResult | None = None
                 decision: TriggerDecision | None = None
 
-                gauge_allowed = not paused and (
-                    smithy is None or smithy.allows_gauge(replace(pkt, timestamp_s=now_s), client_rect)
-                )
+                gauge_allowed = not paused
+                if gauge_allowed and smithy is not None:
+                    # Give the original timing loop first use of active forge frames.
+                    # A few missed frames can occur while the gauge is still running.
+                    if gauge_was_allowed:
+                        det = self._detector.detect_packet(pkt)
+                        gauge_missing_frames = 0 if det.gauge_present else gauge_missing_frames + 1
+                    if not gauge_was_allowed or gauge_missing_frames >= smithy_probe_after:
+                        gauge_allowed = smithy.allows_gauge(replace(pkt, timestamp_s=now_s), client_rect)
+                if not gauge_allowed:
+                    det = None
+                    gauge_missing_frames = 0
                 if gauge_was_allowed and not gauge_allowed and not paused:
                     self._state_machine.reset()
                     self._detector.reset()
                 gauge_was_allowed = gauge_allowed
 
                 if gauge_allowed:
-                    det = self._detector.detect_packet(pkt)
+                    if det is None:
+                        det = self._detector.detect_packet(pkt)
                     if det.gauge_present:
                         detections += 1
                     allow_trigger = not self._mouse.is_pressed
@@ -229,6 +253,12 @@ class Runner:
                                 if decision.release_delay_s > 0.0:
                                     release_ms = max(release_ms, decision.release_delay_s * 1000.0)
                                 self._release_after_hold(now_s, release_ms)
+                                if not self._stop_on_eof and clicks == 1:
+                                    logger.info("Sent first timed Hit click")
+
+                    if det.gauge_present and not self._stop_on_eof and not reported_gauge:
+                        logger.info("Timing gauge detected")
+                        reported_gauge = True
 
                 if self._on_frame is not None:
                     self._on_frame(pkt, det, decision)

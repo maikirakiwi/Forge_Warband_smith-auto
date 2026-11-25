@@ -23,8 +23,9 @@ INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
 INPUT_HARDWARE = 2
 
-VK_TAB = 0x09
+TAB_SCAN_CODE = 0x0F
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
 
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -260,17 +261,34 @@ class Win32SendInputMouse:
         with self._lock:
             if not self._allows_ui_input(rect):
                 return False
-            down = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=VK_TAB))
-            up = INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(wVk=VK_TAB, dwFlags=KEYEVENTF_KEYUP))
+            down = INPUT(
+                type=INPUT_KEYBOARD, ki=KEYBDINPUT(wScan=TAB_SCAN_CODE, dwFlags=KEYEVENTF_SCANCODE)
+            )
+            up = INPUT(
+                type=INPUT_KEYBOARD,
+                ki=KEYBDINPUT(wScan=TAB_SCAN_CODE, dwFlags=KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP),
+            )
             if self._send(down) != 1:
+                self._last_blocked_reason = f"tab_key_down_failed_{self._get_last_error_fn()}"
                 return False
             try:
-                time.sleep(0.035)
+                time.sleep(0.10)
             finally:
                 released = self._send(up) == 1
             if not released:
                 raise RuntimeError("Failed to release Tab after opening or closing Smithy")
             return True
+
+    def move_relative(self, rect: WindowRect, dx: int, dy: int) -> bool:
+        """Send ordinary mouse motion for applications that render their own cursor."""
+        with self._lock:
+            if not self._allows_ui_input(rect):
+                return False
+            event = INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dx=dx, dy=dy, dwFlags=MOUSEEVENTF_MOVE))
+            if self._send(event) == 1:
+                return True
+            self._last_blocked_reason = f"mouse_move_failed_{self._get_last_error_fn()}"
+            return False
 
     def press_left(self, duration_ms: float, timestamp_s: float | None = None) -> bool:
         dur_ms = _validate_duration_ms(duration_ms)
